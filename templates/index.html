@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>配置系统模拟</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 20px;
+        }
+
+        label {
+            display: block;
+            margin-top: 10px;
+            font-weight: bold;
+        }
+
+        textarea, input[type="text"] {
+            width: 90%;
+            max-width: 600px;
+            margin-top: 5px;
+            padding: 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        textarea {
+            height: 80px;
+        }
+
+        button {
+            margin-top: 15px;
+            padding: 10px 20px;
+            background-color: #007bff;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        .info {
+            font-size: 0.9em;
+            color: #555;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+<h1>配置依赖关系可视化模拟</h1>
+<form action="/process" method="post">
+    <label for="goal">目标配置描述:</label>
+    <textarea id="goal" name="goal" required
+              placeholder="描述这个配置需要完成的任务，例如：如果订单状态为已发货而且订单金额小于20则返回：特殊订单"></textarea>
+    <div class="info">系统将尝试根据此描述查找所需的现有配置。</div>
+
+    <label for="extra_api_info">额外信息 (可选的API):</label>
+    <textarea id="extra_api_info" name="extra_api_info"
+              placeholder="如果目标依赖系统中没有的API，请在此处提供其信息（例如，JSON格式描述）。目前为模拟，此信息仅作记录。"></textarea>
+    <div class="info">例如:
+        {"id":"api_new","name":"新用户查询","serviceName":"userService","methodName":"findNewUser"}
+    </div>
+    <div class="result">
+        {% if error %}
+            <h2>处理结果:</h2>
+            <p class="error">{{ error }}</p>
+            {% if llm_reasoning %}
+                <h3>LLM 分析说明:</h3>
+                <pre>{{ llm_reasoning }}</pre>
+            {% endif %}
+        {% endif %}
+
+        {% if graph_svg %}
+            <h2>配置调用流程图:</h2>
+            <div class="graph">
+                {{ graph_svg | safe }}
+            </div>
+            <h3>LLM 分析说明:</h3>
+            <pre>{{ llm_reasoning }}</pre> <h3>解析详情:</h3>
+            <p><strong>识别到的起点:</strong> {{ start_nodes | join(', ') }}</p>
+            <p><strong>识别到的目标:</strong> {{ target_node }}</p>
+            <p><strong>使用的配置:</strong></p>
+            {# Use tojson filter with indent for pretty printing the list of dicts #}
+            <pre>{{ used_configs | tojson(indent=2, ensure_ascii=False) }}</pre>
+        {% endif %}
+
+        {% if not error and not graph_svg and request.method == 'POST' and not llm_reasoning %}
+            {# Condition to catch cases where POST happened but no graph or error message generated (should be less likely now) #}
+            <h2>处理结果:</h2>
+            <p>未能根据输入信息生成有效的流程图。</p>
+        {% endif %}
+    </div>
+    <button type="submit">分析并生成流程图</button>
+</form>
+</body>
+</html>
