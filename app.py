@@ -1,10 +1,13 @@
 import os
 import json
+from turtle import config_dict
+
 import graphviz
 import logging
 from flask import Flask, request, render_template, jsonify
 import google.generativeai as genai
 from dotenv import load_dotenv
+from modelCalls import model_call
 
 # --- Basic Configuration ---
 logging.basicConfig(level=logging.INFO)
@@ -46,9 +49,13 @@ SYSTEM_INFOS = [
 def get_full_config(config_type, config_id, available_apis, available_infos):
     """Finds the full configuration dictionary based on type and id."""
     if config_type == 'api':
-        return find_config_by_id(available_apis, config_id)
+        config_dict = find_config_by_id(available_apis, config_id)
+        config_dict.update({'type': 'api'})
+        return config_dict
     elif config_type == 'info':
-        return find_config_by_id(available_infos, config_id)
+        config_dict = find_config_by_id(available_infos, config_id)
+        config_dict.update({'type': 'info'})
+        return config_dict
     return None
 
 # --- Function to find config by ID (needed by get_full_config) ---
@@ -69,59 +76,61 @@ def build_llm_prompt(target_description, available_apis, available_infos):
     infos_json_string = json.dumps(available_infos, indent=2, ensure_ascii=False)
 
     prompt = f"""
-You are an expert configuration dependency analyzer for a system with APIs and Infos used to process data.
+    你是一个用于分析具有API和信息节点的数据处理系统的配置依赖关系的专家。
 
-System Description:
-- APIs: Represent external interfaces. They take specific 'inputs' and produce 'outputs'.
-- Infos: Represent either starting data points or data processing/calculation logic.
-    - Infos with `type: 'input'` are the necessary starting points for a process. They provide initial data specified in their 'outputs'.
-    - Other Infos might have 'dependencies' on APIs or other Infos, meaning they need data from those dependencies to perform their logic (often described in their 'name' or implied by the overall goal). They produce data specified in their 'outputs'.
-- Your task is to analyze the User Target Description and determine if it can be achieved by chaining the available APIs and Infos. If possible, map the exact dependency flow required.
+    ### 系统描述：
+    - API：代表外部接口。接收特定'输入'并产生'输出'
+    - INFO：代表起始数据点或数据处理/计算逻辑
+        - 类型为'input'的信息节点是流程的必要起点，通过其'outputs'提供初始数据
+        - 其他信息节点可能依赖API或其他信息节点，需要依赖项的数据来执行逻辑（通过'name'或系统目标隐含），并通过'outputs'产生数据
 
-Available Configurations:
+    ### 可用配置：
+    API列表：
+    ```json
+    {apis_json_string}
+    ```
 
-APIs:
-```json
-{{apis_json_string}}
-json
+    INFO列表：
+    ```json
+    {infos_json_string}
+    ```
 
-Infos:
-```json
-{{infos_json_string}}
+    用户目标描述：
+    "{target_description}"
 
-User Target Description:
-"{{target_description}}"
+    ### 分析任务：
+    根据目标描述识别必需的'input'型起始信息节点
+    确定从输入到最终目标所需处理的API和信息节点序列，匹配各步骤的'outputs'与后续步骤的'inputs'需求
+    定义代表最终目标的"target_0"虚拟节点
+    映射所有必需配置间的依赖关系
 
-Analysis Task:
+    ### 输出格式：
+    仅返回单个合法JSON对象，严格遵循以下结构：
 
-Identify the essential starting 'input' Info configurations needed based on the target description.
-Determine the sequence of APIs and Infos required to process the data from the inputs to achieve the final target. Match 'outputs' from one step to the requirements (explicit 'inputs' or inferred needs) of the next.
-Define a final "target" node that represents the calculation or result described in the user target.
-Map the dependencies between all required configurations, including the final target node.
-Output Format:
-Respond ONLY with a single, valid JSON object. Do not include any text before or after the JSON object. The JSON object must strictly adhere to the following structure:
+    ```json
+    {{
+    "success": boolean, // 目标是否可达
+      "reasoning": string, // 成功时的依赖路径说明/失败原因
+      "start_node_ids": [string], // 必需的起始信息节点ID列表（如["info_1"]）
+      "target_node_name": string, // 目标节点描述性名称（如"计算特殊订单状态"）
+      "required_configs": [{{ //列表包含所有唯一配置（API和INFO），这些配置是从开始节点到目标的依赖关系链的一部分。使用配置数据中的原始“ ID”。如果目标不可达则为null。
+        "type": "api|info",
+        "id": number|string // 原始ID
+      }}],
+      "dependencies": {{ // 代表有向图边缘的字典（parent-> child）。key是child的带前缀ID，value是parent的带前缀ID，如果child依赖多个parent,value是parent的带前缀列表。包括虚拟目标节点“target_0”的依赖项，如果目标不可达则为null.
+        "child_node_id_prefixed": "parent_node_id_prefixed",
+        "another_child_id_prefixed": ["parent1_id_prefixed", "parent2_id_prefixed"],
+        "target_0": "final_dependency_id_prefixed_or_list"
+      }}
+    }}
 
-
-```json
-{{
-  "success": boolean, // True if the target can be achieved with the given configurations, False otherwise.
-  "reasoning": string, // A step-by-step explanation of the dependency path if successful, or a clear reason why the target cannot be achieved.
-  "start_node_ids": [string], // List of prefixed IDs (e.g., "info_1", "info_3") corresponding to the REQUIRED 'input' type Info configurations identified in step 1.
-  "target_node_name": string, // A descriptive name for the final target node based on the user's goal (e.g., "Calculate Special Order Status"). Null if success is false.
-  "required_configs": [{{ "type": "api"|"info", "id": number|string }}], // List containing ALL unique configurations (APIs and Infos) that are part of the dependency chain from start nodes to the target. Use the original 'id' from the configuration data. Null if success is false.
-  "dependencies": {{ // Dictionary representing the directed graph edges (Parent -> Child). Key is the CHILD's prefixed ID, value is the PARENT's prefixed ID or a list of PARENT prefixed IDs for multiple dependencies. Include dependencies for the virtual target node 'target_0'. Null if success is false.
-    "child_node_id_prefixed": "parent_node_id_prefixed",
-    "another_child_id_prefixed": ["parent1_id_prefixed", "parent2_id_prefixed"],
-    "target_0": "final_dependency_id_prefixed_or_list"
-  }}
-}}
-Important Instructions for the JSON output:
-
-Use prefixed IDs ONLY in start_node_ids and the keys/values within the dependencies dictionary (e.g., "api_1", "info_2").
-The virtual target node representing the final goal MUST always be identified as "target_0" in the dependencies dictionary.
-The required_configs list should contain objects with "type" and the original "id" (not prefixed). Include all nodes in the successful path.
-If the target cannot be achieved (success: false), provide the reasoning, and set start_node_ids, target_node_name, required_configs, and dependencies to null.
-Ensure the dependency flow is logical, connecting outputs to required inputs or inferred needs. """
+    ### 重要规范：
+    依赖关系键使用带前缀ID（如"api_1"）
+    必须包含"target_0"虚拟节点
+    required_configs使用原始ID
+    失败时相关字段设为null
+    确保依赖流逻辑正确，输出到输入正确衔接
+    """
     return prompt
 
 
@@ -138,45 +147,8 @@ def call_llm_understanding(target_description, available_apis, available_infos):
 
 
     try:
-        # Select the model - use a newer, capable model
-        # model = genai.GenerativeModel('gemini-pro')
-        # Using 1.5 Flash for potentially faster responses, adjust if needed
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-
-        # Set safety settings to be less restrictive for this task if needed, but be cautious
-        # safety_settings = [
-        #     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        #     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
-        # ]
-
-        # Force JSON output if the model supports it (Check Gemini documentation)
-        # Note: As of early 2024, direct JSON mode might be limited.
-        # The prompt strongly instructs JSON output, which is often sufficient.
-        response = model.generate_content(
-            prompt,
-            # safety_settings=safety_settings,
-            generation_config=genai.types.GenerationConfig(
-                 # candidate_count=1, # Default is 1
-                 # stop_sequences=['\n\n'], # Optional: Stop generation earlier
-                 # max_output_tokens=2048, # Adjust as needed
-                 temperature=0.1 # Lower temperature for more deterministic/factual output
-            )
-        )
-
-        logging.info("----- Received Response from LLM -----")
-        # Check for blocked response due to safety
-        if not response.candidates:
-             logging.error("LLM response blocked or empty.")
-             # Try to get blocking reason if available
-             block_reason = response.prompt_feedback.block_reason if response.prompt_feedback else "Unknown"
-             return {"success": False, "message": f"LLM response was blocked or empty. Reason: {block_reason}"}
-
-        raw_response_text = response.text
-        logging.info(raw_response_text)
-        logging.info("----- End of LLM Response -----")
-
+        raw_response_text = model_call.call_deepseek_V3(prompt)
+        logging.info(f"call model finish, res is {raw_response_text}")
         # Clean the response: LLMs sometimes add markdown ```json ... ```
         if raw_response_text.strip().startswith("```json"):
             raw_response_text = raw_response_text.strip()[7:-3].strip()
@@ -255,6 +227,7 @@ def generate_dependency_graph(full_required_configs_with_target, dependencies, t
             parent_id_strs = parent_info if isinstance(parent_info, list) else [parent_info]
 
             # Ensure child node exists before adding edge
+            logging.info(f"node_render_ids is {node_render_ids}")
             if child_id_str not in node_render_ids:
                  logging.warning(f"Dependency specified for child node '{child_id_str}', but this node was not found in required_configs. Skipping edge.")
                  continue
@@ -285,8 +258,8 @@ def index():
 @app.route('/process', methods=['POST'])
 def process_request():
     """Handle user input, call LLM, generate graph, and return result."""
-    target_description = request.form.get('target_description', '')
-    extra_info_str = request.form.get('extra_info', '')
+    target_description = request.form.get('goal', '')
+    extra_info_str = request.form.get('extra_api_info', '')
 
     if not target_description:
         return render_template('index.html', error="目标配置描述不能为空。")
@@ -365,6 +338,11 @@ def process_request():
         if graph_svg:
             # Prepare display data (excluding the virtual target node for the list)
             used_configs_display = [cfg for cfg in full_required_configs if cfg.get('type') != 'target']
+            try:
+                used_configs_json_string = json.dumps(used_configs_display, indent=2, ensure_ascii=False)
+            except TypeError as e:
+                logging.error(f"Error converting used_configs to JSON: {e}")
+                used_configs_json_string = "Error formatting configuration data."
             # Convert start node prefixed IDs back to names for display
             start_node_names = []
             for prefixed_id in start_node_prefixed_ids:
@@ -383,7 +361,7 @@ def process_request():
                                    llm_reasoning=llm_result.get("reasoning", "No reasoning provided."),
                                    start_nodes=start_node_names, # Display names
                                    target_node=target_node_name,
-                                   used_configs=used_configs_display # List of full dicts
+                                   used_configs=used_configs_json_string # List of full dicts
                                    )
         else:
             # Graph generation failed even if LLM succeeded

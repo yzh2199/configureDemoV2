@@ -85,7 +85,7 @@
             <p><strong>识别到的目标:</strong> {{ target_node }}</p>
             <p><strong>使用的配置:</strong></p>
             {# Use tojson filter with indent for pretty printing the list of dicts #}
-            <pre>{{ used_configs | tojson(indent=2, ensure_ascii=False) }}</pre>
+            <pre>{{ used_configs}}</pre>
         {% endif %}
 
         {% if not error and not graph_svg and request.method == 'POST' and not llm_reasoning %}
